@@ -1,0 +1,6 @@
+/data/xuxiaoxu/miniconda3/envs/openscene/lib/python3.8/site-packages/MinkowskiEngine-0.5.4-py3.8-linux-x86_64.egg/MinkowskiEngine/__init__.py:36: UserWarning: The environment variable `OMP_NUM_THREADS` not set. MinkowskiEngine will automatically set `OMP_NUM_THREADS=16`. If you want to set `OMP_NUM_THREADS` manually, please export it on the command line before running a python script. e.g. `export OMP_NUM_THREADS=12; python your_program.py`. It is recommended to set it below 24.
+  warnings.warn(
+Traceback (most recent call last):
+  File "run/evaluate.py", line 23, in <module>
+    from run.distill import get_model
+ModuleNotFoundError: No module named 'run.distill'

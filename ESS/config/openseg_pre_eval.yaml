@@ -1,0 +1,11 @@
+Eval:
+  gpu : 2
+  model : openseg_pre_train
+  manual_seed : 2023
+  log_dir : 
+  model_path : /data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/ESS/log/openseg_pretrain/2025-03-18_10-41/checkpoints/best_model.pth
+  config_name : openseg_pre_train.yaml
+  train_data_path : /data/xuxiaoxu/code/openvocabulary/ovdet_2d/openscene/data/scannet_3d/train
+  pesudo_label_path : /data/xuxiaoxu/code/openvocabulary/ovdet_2d/openscene_ws/out_pesudo/openseg/result_eval
+  train_openseg_embedding_path : /data/xuxiaoxu/code/openvocabulary/ovdet_2d/openscene/test_process
+  save_base : /data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/ESS/ess_openseg_scannet_0.05

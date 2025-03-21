@@ -6,11 +6,18 @@ from os.path import join
 import torch
 import numpy as np
 import SharedArray as SA
+from dataset.voxelizer import Voxelizer
 
-from dataset.point_loader import Point3DLoader
+# from dataset.point_loader import Point3DLoader
 
-class FusedFeatureLoader(Point3DLoader):
+class FusedFeatureLoader(torch.utils.data.Dataset):
     '''Dataloader for fused point features.'''
+
+    SCALE_AUGMENTATION_BOUND = (0.9, 1.1)
+    ROTATION_AUGMENTATION_BOUND = ((-np.pi / 64, np.pi / 64), (-np.pi / 64, np.pi / 64), (-np.pi,
+                                                                                          np.pi))
+    TRANSLATION_AUGMENTATION_RATIO_BOUND = ((-0.2, 0.2), (-0.2, 0.2), (0, 0))
+    ELASTIC_DISTORT_PARAMS = ((0.2, 0.4), (0.8, 1.6))
 
     def __init__(self,
                  datapath_prefix,
@@ -20,23 +27,38 @@ class FusedFeatureLoader(Point3DLoader):
                  identifier=7791, loop=1, eval_all=False,
                  input_color = False,
                  ):
-        super().__init__(datapath_prefix=datapath_prefix, voxel_size=voxel_size,
-                                           split=split, aug=aug, memcache_init=memcache_init,
-                                           identifier=identifier, loop=loop,
-                                           eval_all=eval_all, input_color=input_color)
+
         self.aug = aug
         self.input_color = input_color # decide whether we use point color values as input
 
         # prepare for 3D features
+        self.data_paths = sorted(glob(join(datapath_prefix, split, '*.pth')))
         self.datapath_feat = datapath_prefix_feat
+
+        dataset_name = datapath_prefix.split('/')[-1]
+        self.dataset_name = dataset_name
+
+        self.voxelizer = Voxelizer(
+            voxel_size=voxel_size,
+            clip_bound=None,
+            use_augmentation=True,
+            scale_augmentation_bound=self.SCALE_AUGMENTATION_BOUND,
+            rotation_augmentation_bound=self.ROTATION_AUGMENTATION_BOUND,
+            translation_augmentation_ratio_bound=self.TRANSLATION_AUGMENTATION_RATIO_BOUND)
 
         # Precompute the occurances for each scene
         self.list_occur = []
         for data_path in self.data_paths:
-            scene_name = data_path[:-15].split('/')[-1]
+            if 'scan' in self.dataset_name:
+                scene_name = data_path[:-15].split('/')[-1]
+            else:
+                scene_name = data_path[:-4].split('/')[-1]
+            # import pdb; pdb.set_trace()
+            # file_dirs = glob(join(self.datapath_feat, scene_name + '_*.pt'))
             file_dirs = glob(join(self.datapath_feat, scene_name + '.pt'))
             self.list_occur.append(len(file_dirs))
-        # some scenes in matterport have no features at all
+        
+        # import pdb; pdb.set_trace()
         ind = np.where(np.array(self.list_occur) != 0)[0]
         if np.any(np.array(self.list_occur)==0):
             data_paths, list_occur = [], []
@@ -56,26 +78,31 @@ class FusedFeatureLoader(Point3DLoader):
         labels_in[labels_in == -100] = 255
         labels_in = labels_in.astype(np.uint8)
         if np.isscalar(feats_in) and feats_in == 0:
+            # no color in the input point cloud, e.g nuscenes lidar
             feats_in = np.zeros_like(locs_in)
         else:
             feats_in = (feats_in + 1.) * 127.5
 
         # load 3D features
-        scene_name = self.data_paths[index][:-15].split('/')[-1]
+        if self.dataset_name == 'scannet_3d':
+            scene_name = self.data_paths[index][:-15].split('/')[-1]
+        else:
+            scene_name = self.data_paths[index][:-4].split('/')[-1]
 
+        # no repeated file
+        # processed_data = torch.load(join(self.datapath_feat, scene_name+'_0.pt'))
         processed_data = torch.load(join(self.datapath_feat, scene_name+'.pt'))
 
-        flag_mask_merge = True
         feat_3d, mask_chunk = processed_data['feat'], processed_data['mask_full']
+        # import pdb; pdb.set_trace()
         if isinstance(mask_chunk, np.ndarray): # if the mask itself is a numpy array
             mask_chunk = torch.from_numpy(mask_chunk)
         mask = copy.deepcopy(mask_chunk)
-        if self.split != 'train': # val or test set
-            feat_3d_new = torch.zeros((locs_in.shape[0], feat_3d.shape[1]), dtype=feat_3d.dtype)
-            feat_3d_new[mask] = feat_3d
-            feat_3d = feat_3d_new
-            mask_chunk = torch.ones_like(mask_chunk) # every point needs to be evaluted
-
+        # if self.split != 'train': # val or test set
+        feat_3d_new = torch.zeros((locs_in.shape[0], feat_3d.shape[1]), dtype=feat_3d.dtype)
+        feat_3d_new[mask] = feat_3d
+        feat_3d = feat_3d_new
+        mask_chunk = torch.ones_like(mask_chunk) # every point needs to be evaluted
 
         if len(feat_3d.shape)>2:
             feat_3d = feat_3d[..., 0]
@@ -83,59 +110,15 @@ class FusedFeatureLoader(Point3DLoader):
         locs = self.prevoxel_transforms(locs_in) if self.aug else locs_in
 
         # calculate the corresponding point features after voxelization
-        if self.split == 'train' and flag_mask_merge:  # True
-            locs, feats, labels, inds_reconstruct, vox_ind = self.voxelizer.voxelize(
-                locs_in, feats_in, labels_in, return_ind=True)
-            vox_ind = torch.from_numpy(vox_ind)
-            mask = mask_chunk[vox_ind] # voxelized visible mask for entire point cloud
-            mask_ind = mask_chunk.nonzero(as_tuple=False)[:, 0]
-            index1 = - torch.ones(mask_chunk.shape[0], dtype=int)
-            index1[mask_ind] = mask_ind
+        
+        locs, feats, labels, inds_reconstruct, vox_ind = self.voxelizer.voxelize(
+            locs[mask_chunk], feats_in[mask_chunk], labels_in[mask_chunk], return_ind=True)
+        vox_ind = torch.from_numpy(vox_ind)
+        feat_3d = feat_3d[vox_ind]
+        mask = mask[vox_ind]
 
-            index1 = index1[vox_ind]
-            chunk_ind = index1[index1!=-1]
+        labels = labels_in
 
-            index2 = torch.zeros(mask_chunk.shape[0])
-            index2[mask_ind] = 1
-            index3 = torch.cumsum(index2, dim=0, dtype=int)
-            # get the indices of corresponding masked point features after voxelization
-            indices = index3[chunk_ind] - 1
-
-            # get the corresponding features after voxelization
-            feat_3d = feat_3d[indices]
-        elif self.split == 'train' and not flag_mask_merge: # legacy, for old processed features
-            feat_3d = feat_3d[mask] # get features for visible points
-            locs, feats, labels, inds_reconstruct, vox_ind = self.voxelizer.voxelize(
-                locs_in, feats_in, labels_in, return_ind=True)
-            mask_chunk[mask_chunk.clone()] = mask
-            vox_ind = torch.from_numpy(vox_ind)
-            mask = mask_chunk[vox_ind] # voxelized visible mask for entire point clouds
-            mask_ind = mask_chunk.nonzero(as_tuple=False)[:, 0]
-            index1 = - torch.ones(mask_chunk.shape[0], dtype=int)
-            index1[mask_ind] = mask_ind
-
-            index1 = index1[vox_ind]
-            chunk_ind = index1[index1!=-1]
-
-            index2 = torch.zeros(mask_chunk.shape[0])
-            index2[mask_ind] = 1
-            index3 = torch.cumsum(index2, dim=0, dtype=int)
-            # get the indices of corresponding masked point features after voxelization
-            indices = index3[chunk_ind] - 1
-
-            # get the corresponding features after voxelization
-            feat_3d = feat_3d[indices]
-        else:
-            locs, feats, labels, inds_reconstruct, vox_ind = self.voxelizer.voxelize(
-                locs[mask_chunk], feats_in[mask_chunk], labels_in[mask_chunk], return_ind=True)
-            vox_ind = torch.from_numpy(vox_ind)
-            feat_3d = feat_3d[vox_ind]
-            mask = mask[vox_ind]
-
-        if self.eval_all: # during evaluation, no voxelization for GT labels
-            labels = labels_in
-        if self.aug:
-            locs, feats, labels = self.input_transforms(locs, feats, labels)
         coords = torch.from_numpy(locs).int()
         coords = torch.cat((torch.ones(coords.shape[0], 1, dtype=torch.int), coords), dim=1)
         if self.input_color:
@@ -145,9 +128,11 @@ class FusedFeatureLoader(Point3DLoader):
             feats = torch.ones(coords.shape[0], 3)
         labels = torch.from_numpy(labels).long()
 
-        if self.eval_all:
-            return coords, feats, labels, feat_3d, mask, torch.from_numpy(inds_reconstruct).long()
-        return coords, feats, labels, feat_3d, mask
+        return coords, feats, labels, feat_3d, mask, torch.from_numpy(inds_reconstruct).long()
+
+    def __len__(self):
+        return len(self.data_paths)
+
 
 def collation_fn(batch):
     '''

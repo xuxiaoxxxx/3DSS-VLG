@@ -11,10 +11,10 @@ DATA:
 DISTILL:
   arch_3d: MinkUNet18A
   ignore_label: 255
-  train_gpu: [2,3]
-  workers: 6  # data loader workers
+  train_gpu: [0]
+  workers: 8  # data loader workers
   batch_size: 8  # batch size for training
-  batch_size_val: 2  # batch size for validation during training, memory and speed tradeoff
+  batch_size_val: 1  # batch size for validation during training, memory and speed tradeoff
   base_lr: 0.0001
   loss_type: cosine # l1 | cosine
   loop: 5
@@ -35,18 +35,15 @@ TEST:
   prompt_eng: True
   mark_no_feature_to_unknown: True
   save_feature_as_numpy: False
-  vis_input: False
-  vis_pred: False
-  vis_gt: False
-  test_workers: 4
+  test_workers: 1
   test_gpu: [1]
   test_batch_size: 1
   test_repeats: 5
-  model_path:
+  model_path: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/out_scannet/openseg/model/model_best.pth.tar
   save_folder:
 
 Distributed:
-  dist_url: tcp://127.0.0.1:6792
+  dist_url: tcp://127.0.0.1:6791
   dist_backend: 'nccl'
   multiprocessing_distributed: True
   world_size: 1

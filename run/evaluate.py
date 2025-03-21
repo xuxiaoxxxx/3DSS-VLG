@@ -3,8 +3,8 @@ import random
 import numpy as np
 import logging
 import argparse
-import urllib
 
+import open3d
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn.parallel
@@ -12,29 +12,25 @@ import torch.optim
 import torch.utils.data
 import torch.multiprocessing as mp
 import torch.distributed as dist
+from os.path import join
 from util import metric
-from torch.utils import model_zoo
+from util import config
 
 from MinkowskiEngine import SparseTensor
-from util import config
-from util.util import export_pointcloud, get_palette, \
-    convert_labels_with_palette, extract_text_feature, visualize_labels
+from dataset.point_loader import Point3DLoader, collation_fn_eval_all
 from tqdm import tqdm
 from models.disnet import DisNet as Model
-
-from dataset.label_constants import *
 
 
 def get_parser():
     '''Parse the config file.'''
-
-    parser = argparse.ArgumentParser(description='OpenScene evaluation')
+    parser = argparse.ArgumentParser(description='MinkowskiNet evaluation.')
     parser.add_argument('--config', type=str,
-                    default='config/scannet/eval_openseg.yaml',
+                    default='config/scannet/eval_mink.yaml',
                     help='config file')
     parser.add_argument('opts',
                     default=None,
-                    help='see config/scannet/test_ours_openseg.yaml for all options',
+                    help='see config/scannet/train_mink.yaml for all options',
                     nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
@@ -43,53 +39,31 @@ def get_parser():
         cfg = config.merge_cfg_from_list(cfg, args.opts)
     return cfg
 
-def get_model(cfg):
-    '''Get the 3D model.'''
-
-    model = Model(cfg=cfg)
-    return model
-
 
 def get_logger():
     '''Define logger.'''
 
     logger_name = "main-logger"
-    logger_in = logging.getLogger(logger_name)
-    logger_in.setLevel(logging.DEBUG)
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
     handler = logging.StreamHandler()
-    fmt = "[%(asctime)s %(filename)s line %(lineno)d] %(message)s"
+    fmt = "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s"
     handler.setFormatter(logging.Formatter(fmt))
-    logger_in.addHandler(handler)
-    return logger_in
+    logger.addHandler(handler)
+    return logger
 
-def is_url(url):
-    scheme = urllib.parse.urlparse(url).scheme
-    return scheme in ('http', 'https')
 
 def main_process():
     return not args.multiprocessing_distributed or (
             args.multiprocessing_distributed and args.rank % args.ngpus_per_node == 0)
 
-def precompute_text_related_properties(labelset_name):
-    '''pre-compute text features, labelset, palette, and mapper.'''
-
-    if 'scannet' in labelset_name:
-        labelset = list(SCANNET_LABELS_20)
-        labelset[-1] = 'other' # change 'other furniture' to 'other'
-        palette = get_palette(colormap='scannet')
-
-    mapper = None
-
-    text_features = extract_text_feature(labelset, args)
-    labelset.append('unlabeled')
-    return text_features, labelset, mapper, palette
 
 def main():
     '''Main function.'''
 
     args = get_parser()
 
-    # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
+    os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
     cudnn.benchmark = True
     if args.manual_seed is not None:
         random.seed(args.manual_seed)
@@ -102,7 +76,7 @@ def main():
         'torch.__version__:%s\ntorch.version.cuda:%s\ntorch.backends.cudnn.version:%s\ntorch.backends.cudnn.enabled:%s' % (
             torch.__version__, torch.version.cuda, torch.backends.cudnn.version(), torch.backends.cudnn.enabled))
 
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed    
+    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
     args.ngpus_per_node = len(args.test_gpu)
     if len(args.test_gpu) == 1:
         args.sync_bn = False
@@ -110,16 +84,29 @@ def main():
         args.multiprocessing_distributed = False
         args.use_apex = False
 
-    
-    # By default we do not use shared memory for evaluation
     if not hasattr(args, 'use_shm'):
-        args.use_shm = False
+        args.use_shm = True
+
     if args.use_shm:
+        # Following code is for caching dataset into memory
+        _ = Point3DLoader(datapath_prefix=args.data_root,
+                        voxel_size=args.voxel_size,
+                        split='val',
+                        aug=False,
+                        memcache_init=True,
+                        eval_all=True,
+                        identifier=6797)
         if args.multiprocessing_distributed:
             args.world_size = args.ngpus_per_node * args.world_size
             mp.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args.ngpus_per_node, args))
     else:
         main_worker(args.test_gpu, args.ngpus_per_node, args)
+
+def get_model(cfg):
+    '''Get the 3D model.'''
+
+    model = Model(cfg=cfg)
+    return model
 
 
 def main_worker(gpu, ngpus_per_node, argss):
@@ -128,14 +115,18 @@ def main_worker(gpu, ngpus_per_node, argss):
     if args.distributed:
         if args.multiprocessing_distributed:
             args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size,
+        dist.init_process_group(backend=args.dist_backend,
+                                init_method=args.dist_url,
+                                world_size=args.world_size,
                                 rank=args.rank)
-
     model = get_model(args)
     if main_process():
         global logger
         logger = get_logger()
         logger.info(args)
+        logger.info("=> creating model ...")
+        logger.info("Classes: {}".format(args.classes))
+        logger.info(model)
 
     if args.distributed:
         torch.cuda.set_device(gpu)
@@ -145,17 +136,11 @@ def main_worker(gpu, ngpus_per_node, argss):
     else:
         model = model.cuda()
 
-    if args.feature_type == 'fusion':
-        pass # do not need to load weight
-    elif is_url(args.model_path): # load from url
-        checkpoint = model_zoo.load_url(args.model_path, progress=True)
-        model.load_state_dict(checkpoint['state_dict'], strict=True)
-    
-    elif args.model_path is not None and os.path.isfile(args.model_path):
-        # load from directory
+    if os.path.isfile(args.model_path):
         if main_process():
             logger.info("=> loading checkpoint '{}'".format(args.model_path))
         checkpoint = torch.load(args.model_path, map_location=lambda storage, loc: storage.cuda())
+
         try:
             model.load_state_dict(checkpoint['state_dict'], strict=True)
         except Exception as ex:
@@ -174,226 +159,85 @@ def main_worker(gpu, ngpus_per_node, argss):
             model.load_state_dict(new_state_dict, strict=True)
             logger.info('Loaded a parallel model')
 
+        # model.load_state_dict(checkpoint['state_dict'], strict=True)
         if main_process():
-            logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.model_path, checkpoint['epoch']))    
+            logger.info("=> loaded checkpoint '{}' (epoch {})".format(args.model_path, checkpoint['epoch']))
     else:
         raise RuntimeError("=> no checkpoint found at '{}'".format(args.model_path))
 
     # ####################### Data Loader ####################### #
     if not hasattr(args, 'input_color'):
-        # by default we do not use the point color as input
         args.input_color = False
-    
-    from dataset.point_loader import Point3DLoader, collation_fn_eval_all
 
-    val_data = Point3DLoader(datapath_prefix=args.data_root,
-                                 voxel_size=args.voxel_size,
-                                 split='val', aug=False,
-                                 memcache_init=args.use_shm,
-                                 eval_all=True,
-                                 input_color=args.input_color)
+    val_data = Point3DLoader(datapath_prefix=args.data_root, voxel_size=args.voxel_size,
+                            split=args.split, aug=False,memcache_init=args.use_shm,
+                            eval_all=True, identifier=6797, input_color=args.input_color)
     val_sampler = None
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
-                                            shuffle=False,
-                                            num_workers=args.workers, pin_memory=False,
-                                            drop_last=False, collate_fn=collation_fn_eval_all,
-                                            sampler=val_sampler)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.test_batch_size,
+                                            shuffle=False, num_workers=args.test_workers,
+                                            pin_memory=True, drop_last=False,
+                                            collate_fn=collation_fn_eval_all, sampler=val_sampler)
+
     # ####################### Test ####################### #
-    labelset_name = args.data_root.split('/')[-1]
-    if hasattr(args, 'labelset'):
-        # if the labelset is specified
-        labelset_name = args.labelset
+    evaluate(model, val_loader)
 
-    evaluate(model, val_loader, labelset_name)
-
-def evaluate(model, val_data_loader, labelset_name='scannet_3d'):
-    '''Evaluate our OpenScene model.'''
+def evaluate(model, val_loader):
+    '''Evaluation MinkowskiNet.'''
 
     torch.backends.cudnn.enabled = False
-
-    if not os.path.exists(args.save_folder):
-        os.makedirs(args.save_folder, exist_ok=True)
-
-    if args.save_feature_as_numpy: # save point features to folder
-        out_root = os.path.commonprefix([args.save_folder, args.model_path])
-        saved_feature_folder = os.path.join(out_root, 'saved_feature')
-        os.makedirs(saved_feature_folder, exist_ok=True)
-
-    # short hands
-    save_folder = args.save_folder
-
-    eval_iou = True
-    if hasattr(args, 'eval_iou'):
-        eval_iou = args.eval_iou
-    mark_no_feature_to_unknown = False
-    if hasattr(args, 'mark_no_feature_to_unknown') and args.mark_no_feature_to_unknown:
-        # some points do not have 2D features from 2D feature fusion. Directly assign 'unknown' label to those points during inference
-        mark_no_feature_to_unknown = True
-    vis_input = False
-    if hasattr(args, 'vis_input') and args.vis_input:
-        vis_input = True
-    vis_pred = False
-    if hasattr(args, 'vis_pred') and args.vis_pred:
-        vis_pred = True
-    vis_gt = False
-    if hasattr(args, 'vis_gt') and args.vis_gt:
-        vis_gt = True
-
-    text_features, labelset, mapper, palette = \
-        precompute_text_related_properties(labelset_name)
-
-    time_all = 0
-    import time
+    dataset_name = args.data_root.split('/')[-1]
+    model.eval()
+    text_feature = np.load('/data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/saved_text_embeddings/scannet_openseg_768.npy')
+    text_features = torch.from_numpy(text_feature).float().cuda().half()
     with torch.no_grad():
-        model.eval()
         store = 0.0
         for rep_i in range(args.test_repeats):
-            preds, gts = [], []
-            val_data_loader.dataset.offset = rep_i
-            if main_process():
-                logger.info(
-                    "\nEvaluation {} out of {} runs...\n".format(rep_i+1, args.test_repeats))
+            preds = []
+            gts = []
 
             # repeat the evaluation process
             # to account for the randomness in MinkowskiNet voxelization
-            if rep_i>0:
-                seed = np.random.randint(10000)
-                random.seed(seed)
-                np.random.seed(seed)
-                torch.manual_seed(seed)
-                torch.cuda.manual_seed(seed)
-                torch.cuda.manual_seed_all(seed)
+            seed = np.random.randint(10000)
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
 
-            if mark_no_feature_to_unknown:
-                masks = []
-
-            # for i, (coords, feat, label, feat_3d, mask, inds_reverse) in enumerate(tqdm(val_data_loader)):
-            for i, (coords, feat, label, inds_reverse) in enumerate(tqdm(val_data_loader)):
+            for i, (coords, feat, label, inds_reverse) in enumerate(tqdm(val_loader)):
                 sinput = SparseTensor(feat.cuda(non_blocking=True), coords.cuda(non_blocking=True))
-                coords = coords[inds_reverse, :]
-                pcl = coords[:, 1:].cpu().numpy()
-
-                    
-                begin = time.time()
                 predictions = model(sinput)
-                end = time.time()
-                process_time = end - begin
-                # print("cost time:", end - begin)
-                # time_all += (end - begin)
-                predictions = predictions[inds_reverse, :]
-                pred = predictions.half() @ text_features.t()
+                predictions_enlarge = predictions[inds_reverse, :]
+                predictions_enlarge = predictions_enlarge.half() @ text_features.t()
 
-                # add the mask
-                # cloud_label_idx = torch.unique(label)
-                # if cloud_label_idx[-1] == 255:
-                #     cloud_label_idx = cloud_label_idx[:-1]
-                # cloud_label = torch.zeros(20)
-                # cloud_label[cloud_label_idx] = 1
-                
-                # pred = pred.cpu()
-                # pred[:, cloud_label == 0] = -999
-
-                logits_pred = torch.max(pred, 1)[1].cpu()
-
-
-                if args.save_feature_as_numpy:
-                    scene_name = val_data_loader.dataset.data_paths[i].split('/')[-1].split('.pth')[0]
-                    np.save(os.path.join(saved_feature_folder, '{}_openscene_feat_{}.npy'.format(scene_name, feature_type)), predictions.cpu().numpy())
-                
-                # generate the test prediction 
-                saved_feature_folder = '/data/xuxiaoxu/code/openvocabulary/ovdet_2d/ws_seg/scannet_test/new_direct'
-                if not os.path.exists(saved_feature_folder):
-                    os.makedirs(saved_feature_folder)
-
-                # Visualize the input, predictions and GT
-                save_name = val_data_loader.dataset.data_paths[i].split('/')[-1][:-15]
-          
-                # special case for nuScenes, evaluation points are only a subset of input
-                if 'nuscenes' in labelset_name:
-                    label_mask = (label!=255)
-                    label = label[label_mask]
-                    logits_pred = logits_pred[label_mask]
-                    pred = pred[label_mask]
-                    if vis_pred:
-                        pcl = torch.load(val_data_loader.dataset.data_paths[i])[0][label_mask]
-
-                if vis_input:
-                    input_color = torch.load(val_data_loader.dataset.data_paths[i])[1]
-                    export_pointcloud(os.path.join(save_folder, '{}_input.ply'.format(save_name)), pcl, colors=(input_color+1)/2)
-
-                if vis_pred:
-                    if mapper is not None:
-                        pred_label_color = convert_labels_with_palette(mapper[logits_pred].numpy(), palette)
-                        export_pointcloud(os.path.join(save_folder, '{}_{}.ply'.format(save_name, feature_type)), pcl, colors=pred_label_color)
-                    else:
-                        pred_label_color = convert_labels_with_palette(logits_pred.numpy(), palette)
-                        # print("pred_label_color:", pred_label_color.shape, pcl.shape)
-                        export_pointcloud(os.path.join(save_folder, '{}_{}.ply'.format(save_name, feature_type)), pcl, colors=pred_label_color)
-                        visualize_labels(list(np.unique(logits_pred.numpy())),
-                                    labelset,
-                                    palette,
-                                    os.path.join(save_folder, '{}_labels_{}.jpg'.format(save_name, feature_type)), ncol=5)
-
-                # Visualize GT labels
-                if vis_gt:
-                    # for points not evaluating
-                    label[label==255] = len(labelset)-1
-                    gt_label_color = convert_labels_with_palette(label.cpu().numpy(), palette)
-                    export_pointcloud(os.path.join(save_folder, '{}_gt.ply'.format(save_name)), pcl, colors=gt_label_color)
-                    visualize_labels(list(np.unique(label.cpu().numpy())),
-                                labelset,
-                                palette,
-                                os.path.join(save_folder, '{}_labels_gt.jpg'.format(save_name)), ncol=5)
-
-                    
-                if eval_iou:
-                    if mark_no_feature_to_unknown:
-                        if "nuscenes" in labelset_name: # special case
-                            masks.append(mask[inds_reverse][label_mask])
-                        else:
-                            masks.append(mask[inds_reverse])
-
-                    if args.test_repeats==1:
-                        # save directly the logits
-                        preds.append(logits_pred)
-                    else:
-                        # only save the dot-product results, for repeat prediction
-                        preds.append(pred.cpu())
-
-                    gts.append(label.cpu())
-            print("all time cost:", time_all)
-            if eval_iou:
-                gt = torch.cat(gts)
-                pred = torch.cat(preds)
-
-                pred_logit = pred
-                if args.test_repeats>1:
-                    pred_logit = pred.float().max(1)[1]
-
-                if mapper is not None:
-                    pred_logit = mapper[pred_logit]
-
-                if mark_no_feature_to_unknown:
-                    mask = torch.cat(masks)
-                    pred_logit[~mask] = 256
-
+                if args.multiprocessing_distributed:
+                    dist.all_reduce(predictions_enlarge)
                 if args.test_repeats==1:
-                    current_iou = metric.evaluate(pred_logit.numpy(),
-                                                gt.numpy(),
-                                                dataset=labelset_name,
-                                                stdout=True)
-                if args.test_repeats > 1:
-                    store = pred + store
-                    store_logit = store.float().max(1)[1]
-                    if mapper is not None:
-                        store_logit = mapper[store_logit]
-
-                    if mark_no_feature_to_unknown:
-                        store_logit[~mask] = 256
-                    accumu_iou = metric.evaluate(store_logit.numpy(),
-                                                gt.numpy(),
-                                                stdout=True,
-                                                dataset=labelset_name)
+                    preds.append(predictions_enlarge.detach_().cpu().max(1)[1])
+                else:
+                    preds.append(predictions_enlarge.detach_().cpu())
+                gts.append(label.cpu())
+            gt = torch.cat(gts)
+            pred = torch.cat(preds)
+            if args.test_repeats==1:
+                current_iou = metric.evaluate(pred.numpy(),
+                                              gt.numpy(),
+                                              dataset=dataset_name,
+                                              stdout=True)
+            else:
+                current_iou = metric.evaluate(pred.max(1)[1].numpy(),
+                                              gt.numpy(),
+                                              dataset=dataset_name)
+                # if rep_i == 0 and main_process():
+                #     np.save(join(args.save_folder, 'gt.npy'), gt.numpy())
+                store = pred + store
+                accumu_iou = metric.evaluate(store.max(1)[1].numpy(),
+                                             gt.numpy(),
+                                             stdout=True,
+                                             dataset=dataset_name)
+                # if main_process():
+                #     np.save(join(args.save_folder, 'pred.npy'), store.max(1)[1].numpy())
+                print(current_iou, accumu_iou)
 
 if __name__ == '__main__':
     main()

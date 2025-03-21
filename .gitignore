@@ -23,3 +23,7 @@ saved_text_embeddings/
 dataset/__pycache__
 model/__pycache__
 util/__pycache__
+ESS/ess*/
+ESS/log
+out*/
+calcu*

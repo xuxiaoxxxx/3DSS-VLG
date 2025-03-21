@@ -1,6 +1,6 @@
 DATA:
   data_root: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/openscene/data/scannet_3d
-  data_root_2d_fused_feature: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/openscene/data/scannet_multiview_openseg
+  data_root_2d_fused_feature: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/ESS/ess_openseg_scannet_0.05
   feature_2d_extractor: openseg
   classes: 20
   aug: True
@@ -13,7 +13,7 @@ DISTILL:
   ignore_label: 255
   train_gpu: [0]
   workers: 8  # data loader workers
-  batch_size: 8  # batch size for training
+  batch_size: 4  # batch size for training
   batch_size_val: 1  # batch size for validation during training, memory and speed tradeoff
   base_lr: 0.0001
   loss_type: cosine # l1 | cosine
@@ -29,23 +29,6 @@ DISTILL:
   resume:
   evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
   eval_freq: 1
-
-TEST:
-  split: val  # split in [train, val]
-  prompt_eng: True
-  mark_no_feature_to_unknown: True
-  feature_type: 'distill' # 'distill' | 'fusion' | 'ensemble'
-  save_feature_as_numpy: False
-  vis_input: False
-  vis_pred: False
-  vis_gt: False
-  test_workers: 8
-  test_gpu: [0]
-  test_batch_size: 1
-  test_repeats: 5
-  # model_path: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/ws_seg/out_w_filter_pl/openseg/model/model_best.pth.tar
-  model_path: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/ws_seg/out_test/scannet_use_color/model/model_best.pth.tar
-  save_folder:
 
 Distributed:
   dist_url: tcp://127.0.0.1:6791

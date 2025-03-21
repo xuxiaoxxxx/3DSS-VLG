@@ -38,9 +38,9 @@ def worker_init_fn(worker_id):
 def get_parser():
     '''Parse the config file.'''
 
-    parser = argparse.ArgumentParser(description='OpenScene 3D distillation.')
+    parser = argparse.ArgumentParser(description='Embeddings Soft-Guidance Stage.')
     parser.add_argument('--config', type=str,
-                        default='config/scannet/distill_openseg.yaml',
+                        default='config/scannet/openseg.yaml',
                         help='config file')
     parser.add_argument('opts',
                         default=None,
@@ -129,10 +129,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, 
                                 world_size=args.world_size, rank=args.rank)
-        # dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url, 
-        #                         world_size=args.world_size, rank=args.rank)
-    # print("rank id:", args.rank, main_process(), args.distributed, gpu, ngpus_per_node)
-    # print(a)
+
     model = get_model(args)
     if main_process():
         global logger, writer
@@ -150,8 +147,6 @@ def main_worker(gpu, ngpus_per_node, argss):
         args.batch_size = int(args.batch_size / ngpus_per_node)
         args.batch_size_val = int(args.batch_size_val / ngpus_per_node)
         args.workers = int(args.workers / ngpus_per_node)
-        # print("args.batch_size_val:", args.batch_size_val)
-        # print("args.batch_size:", args.batch_size, args.workers)
         model = torch.nn.parallel.DistributedDataParallel(
             model.cuda(), device_ids=[gpu])
     else:
@@ -176,7 +171,6 @@ def main_worker(gpu, ngpus_per_node, argss):
                     "=> no checkpoint found at '{}'".format(args.resume))
 
     # ####################### Data Loader ####################### #
-    print("args.data_root:", args.data_root, args.data_root_2d_fused_feature)
     if not hasattr(args, 'input_color'):
         # by default we do not use the point color as input
         args.input_color = False
@@ -212,13 +206,13 @@ def main_worker(gpu, ngpus_per_node, argss):
 
         criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda(gpu) # for evaluation
 
-    # ####################### Distill ####################### #
+    # ####################### ESG ####################### #
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
             if args.evaluate:
                 val_sampler.set_epoch(epoch)
-        loss_train = distill(train_loader, model, optimizer, epoch)
+        loss_train = esg(train_loader, model, optimizer, epoch)
         epoch_log = epoch + 1
         if main_process():
             writer.add_scalar('loss_train', loss_train, epoch_log)
@@ -258,41 +252,9 @@ def get_model(cfg):
     model = Model(cfg=cfg)
     return model
 
-def obtain_text_features_and_palette():
-    '''obtain the CLIP text feature and palette.'''
 
-    if 'scannet' in args.data_root:
-        labelset = list(SCANNET_LABELS_20)
-        labelset[-1] = 'other'
-        palette = get_palette()
-        dataset_name = 'scannet'
-
-    if not os.path.exists('saved_text_embeddings'):
-        os.makedirs('saved_text_embeddings')
-
-    if 'openseg' in args.feature_2d_extractor:
-        model_name="ViT-L/14@336px"
-        postfix = '_768' # the dimension of CLIP features is 768
-    elif 'lseg' in args.feature_2d_extractor:
-        model_name="ViT-B/32"
-        postfix = '_512' # the dimension of CLIP features is 512
-    else:
-        raise NotImplementedError
-
-    clip_file_name = 'saved_text_embeddings/clip_{}_labels{}.pt'.format(dataset_name, postfix)
-
-    try: # try to load the pre-saved embedding first
-        logger.info('Load pre-computed embeddings from {}'.format(clip_file_name))
-        text_features = torch.load(clip_file_name).cuda()
-    except: # extract CLIP text features and save them
-        text_features = extract_clip_feature(labelset, model_name=model_name)
-        torch.save(text_features, clip_file_name)
-
-    return text_features, palette
-
-
-def distill(train_loader, model, optimizer, epoch):
-    '''Distillation pipeline.'''
+def esg(train_loader, model, optimizer, epoch):
+    '''ESG pipeline.'''
 
     torch.backends.cudnn.enabled = True
     batch_time = AverageMeter()
@@ -304,9 +266,6 @@ def distill(train_loader, model, optimizer, epoch):
     end = time.time()
     max_iter = args.epochs * len(train_loader)
 
-    text_features, palette = obtain_text_features_and_palette()
-
-    # start the distillation process
     for i, batch_data in enumerate(train_loader):
         data_time.update(time.time() - end)
 
@@ -319,7 +278,7 @@ def distill(train_loader, model, optimizer, epoch):
 
         output_3d = model(sinput)
         output_3d = output_3d[mask]
-        # print(output_3d.shape, feat_3d.shape)
+
         if hasattr(args, 'loss_type') and args.loss_type == 'cosine':
             loss = (1 - torch.nn.CosineSimilarity()
                     (output_3d, feat_3d)).mean()
@@ -369,34 +328,6 @@ def distill(train_loader, model, optimizer, epoch):
 
         end = time.time()
 
-    mask_first = (coords[mask][:, 0] == 0)
-    output_3d = output_3d[mask_first]
-    feat_3d = feat_3d[mask_first]
-    logits_pred = output_3d.half() @ text_features.t()
-    logits_img = feat_3d.half() @ text_features.t()
-    logits_pred = torch.max(logits_pred, 1)[1].cpu().numpy()
-    logits_img = torch.max(logits_img, 1)[1].cpu().numpy()
-    mask = mask.cpu().numpy()
-    logits_gt = label_3d.numpy()[mask][mask_first.cpu().numpy()]
-    logits_gt[logits_gt == 255] = args.classes
-
-    pcl = coords[:, 1:].cpu().numpy()
-
-    seg_label_color = convert_labels_with_palette(
-        logits_img, palette)
-    pred_label_color = convert_labels_with_palette(
-        logits_pred, palette)
-    gt_label_color = convert_labels_with_palette(
-        logits_gt, palette)
-    pcl_part = pcl[mask][mask_first.cpu().numpy()]
-
-    export_pointcloud(os.path.join(args.save_path, 'result', 'last', '{}_{}.ply'.format(
-        args.feature_2d_extractor, epoch)), pcl_part, colors=seg_label_color)
-    export_pointcloud(os.path.join(args.save_path, 'result', 'last',
-                        'pred_{}.ply'.format(epoch)), pcl_part, colors=pred_label_color)
-    export_pointcloud(os.path.join(args.save_path, 'result', 'last',
-                        'gt_{}.ply'.format(epoch)), pcl_part, colors=gt_label_color)
-
     return loss_meter.avg
 
 
@@ -410,7 +341,8 @@ def validate(val_loader, model, criterion):
     target_meter = AverageMeter()
 
     # obtain the CLIP feature
-    text_features, _ = obtain_text_features_and_palette()
+    text_feature = np.load('/data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/saved_text_embeddings/scannet_openseg_768.npy')
+    text_features = torch.from_numpy(text_feature).float().cuda().half()
 
     with torch.no_grad():
         for batch_data in tqdm(val_loader):

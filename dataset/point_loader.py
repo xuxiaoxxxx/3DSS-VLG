@@ -77,13 +77,8 @@ class Point3DLoader(torch.utils.data.Dataset):
         if split is None:
             split = ''
         self.identifier = identifier
-        # datapath_prefix = '/data/xuxiaoxu/code/openvocabulary/ovdet_2d/ws_seg/data/scannet_3d'
-        # print("datapath_prefix:", join(datapath_prefix, split, '*.pth'))
         self.data_paths = sorted(glob(join(datapath_prefix, split, '*.pth')))
-        # self.data_paths = sorted(glob(join(datapath_prefix, 'train', '*.pth')))
 
-        print('--'*100)
-        print("self.data_paths-------:", len(self.data_paths), loop)
         if len(self.data_paths) == 0:
             raise Exception('0 file is loaded in the point loader.')
 
@@ -118,49 +113,18 @@ class Point3DLoader(torch.utils.data.Dataset):
             ]
             self.input_transforms = t.Compose(input_transforms)
 
-        if memcache_init and (not exists("/dev/shm/%s_%s_%06d_locs_%08d" % (dataset_name, split, identifier, 0))):
-            print('[*] Starting shared memory init ...')
-            print('No. CPUs: ', mp.cpu_count())
-            for i, (locs, feats, labels) in enumerate(torch.utils.data.DataLoader(
-                    self.data_paths, collate_fn=lambda x: torch.load(x[0]),
-                    num_workers=min(16, mp.cpu_count()), shuffle=False)):
-                labels[labels == -100] = 255
-                labels = labels.astype(np.uint8)
-                # no color in the input point cloud, e.g nuscenes
-                if np.isscalar(feats) and feats == 0:
-                    feats = np.zeros_like(locs)
-                # Scale color to 0-255
-                feats = (feats + 1.) * 127.5
-                sa_create("shm://%s_%s_%06d_locs_%08d" %
-                          (dataset_name, split, identifier, i), locs)
-                sa_create("shm://%s_%s_%06d_feats_%08d" %
-                          (dataset_name, split, identifier, i), feats)
-                sa_create("shm://%s_%s_%06d_labels_%08d" %
-                          (dataset_name, split, identifier, i), labels)
-            print('[*] %s (%s) loading 3D points done (%d)! ' %
-                  (datapath_prefix, split, len(self.data_paths)))
 
     def __getitem__(self, index_long):
-        # print('--'*100)
-        # print("self.data_paths-------:", len(self.data_paths))
-        # print(a)
+
         index = index_long % len(self.data_paths)
-        if self.use_shm:
-            locs_in = SA.attach("shm://%s_%s_%06d_locs_%08d" %
-                                (self.dataset_name, self.split, self.identifier, index)).copy()
-            feats_in = SA.attach("shm://%s_%s_%06d_feats_%08d" %
-                                 (self.dataset_name, self.split, self.identifier, index)).copy()
-            labels_in = SA.attach("shm://%s_%s_%06d_labels_%08d" %
-                                  (self.dataset_name, self.split, self.identifier, index)).copy()
-        else:
-            locs_in, feats_in, labels_in = torch.load(self.data_paths[index])
-            labels_in[labels_in == -100] = 255
-            labels_in = labels_in.astype(np.uint8)
-            # no color in the input point cloud, e.g nuscenes
-            if np.isscalar(feats_in) and feats_in == 0:
-                feats_in = np.zeros_like(locs_in)
-            feats_in = (feats_in + 1.) * 127.5
-        # print("self.data_paths[index]:", self.data_paths[index])
+        locs_in, feats_in, labels_in = torch.load(self.data_paths[index])
+        labels_in[labels_in == -100] = 255
+        labels_in = labels_in.astype(np.uint8)
+        # no color in the input point cloud, e.g nuscenes
+        if np.isscalar(feats_in) and feats_in == 0:
+            feats_in = np.zeros_like(locs_in)
+        feats_in = (feats_in + 1.) * 127.5
+
         locs = self.prevoxel_transforms(locs_in) if self.aug else locs_in
         locs, feats, labels, inds_reconstruct = self.voxelizer.voxelize(
             locs, feats_in, labels_in)

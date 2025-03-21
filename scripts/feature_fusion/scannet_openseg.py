@@ -139,9 +139,9 @@ def main(args):
     process_id_range = args.process_id_range
 
 
-    if split== '1': # for training set, export a chunk of point cloud
-        args.n_split_points = 20000
-        args.num_rand_file_per_scene = 5
+    if split== '1': # for training set, export the entire point cloud instead of chunks
+        args.n_split_points = 2000000
+        args.num_rand_file_per_scene = 1
     else: # for the validation set, export the entire point cloud instead of chunks
         args.n_split_points = 2000000
         args.num_rand_file_per_scene = 1
@@ -171,9 +171,7 @@ def main(args):
     id_range = None
     if process_id_range is not None:
         id_range = [int(process_id_range[0].split(',')[0]), int(process_id_range[0].split(',')[1])]
-    print("total_num:", total_num)
-    # print(data_paths)
-    begin = 1100
+    begin = 0
     end = total_num
     print("process begin id :", begin, " , end id: ", end)
     for i in trange(begin, end):

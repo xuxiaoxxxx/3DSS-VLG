@@ -16,7 +16,7 @@ out_s3dis_test/
 s3dis_embeddings/
 out_scannet_200_test/
 scannet_200_embeddings/
-out_scannet_train/openseg/model
+out_scannet_train
 out_scannet_train/openseg/result
 saved_text_embeddings/
 dataset/__pycache__

@@ -17,9 +17,8 @@ from tensorboardX import SummaryWriter
 from util import metric
 from MinkowskiEngine import SparseTensor
 from util import config
-from util.util import AverageMeter, intersectionAndUnionGPU, \
-    poly_learning_rate, save_checkpoint, \
-    export_pointcloud, get_palette, convert_labels_with_palette, extract_clip_feature
+from util.util import AverageMeter, \
+    poly_learning_rate, save_checkpoint
 from dataset.label_constants import *
 from dataset.pretrain_loader import FusedFeatureLoader, collation_fn
 from dataset.point_loader import Point3DLoader, collation_fn_eval_all
@@ -151,7 +150,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             model.cuda(), device_ids=[gpu])
     else:
         model = model.cuda()
-    # args.resume = '/data/xuxiaoxu/code/openvocabulary/ovdet_2d/ws_seg/out_test/scannet_use_color/model/model_best.pth.tar'
+
     if args.resume:
         if main_process():
             logger.info("=> loading checkpoint '{}'".format(args.resume))
@@ -198,22 +197,11 @@ def main_worker(gpu, ngpus_per_node, argss):
                                             drop_last=True, collate_fn=collation_fn,
                                             worker_init_fn=worker_init_fn)
     if args.evaluate:
-        # val_data = Point3DLoader(datapath_prefix=args.data_root,
-        #                          voxel_size=args.voxel_size,
-        #                          split='val', aug=False,
-        #                          memcache_init=args.use_shm,
-        #                          eval_all=True,
-        #                          input_color=args.input_color)
         val_data = Point3DLoader(datapath_prefix=args.data_root, voxel_size=args.voxel_size,
                             split='val', aug=False,memcache_init=args.use_shm,
                             eval_all=True, identifier=6797, input_color=args.input_color)
         val_sampler = torch.utils.data.distributed.DistributedSampler(
             val_data) if args.distributed else None
-        # val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
-        #                                         shuffle=False,
-        #                                         num_workers=args.workers, pin_memory=False,
-        #                                         drop_last=False, collate_fn=collation_fn_eval_all,
-        #                                         sampler=val_sampler)
         val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val,
                                             shuffle=False, num_workers=1,
                                             pin_memory=True, drop_last=False,
@@ -243,8 +231,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             if main_process():
                 writer.add_scalar('loss_val', loss_val, epoch_log)
                 writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
-                # writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
-                # writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
+
                 # remember best iou and save checkpoint
                 is_best = mIoU_val > best_iou
                 best_iou = max(best_iou, mIoU_val)
@@ -353,9 +340,6 @@ def validate(val_loader, model, criterion):
 
     torch.backends.cudnn.enabled = False
     loss_meter = AverageMeter()
-    intersection_meter = AverageMeter()
-    union_meter = AverageMeter()
-    target_meter = AverageMeter()
 
     # obtain the CLIP feature
     text_feature = np.load('/data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/saved_text_embeddings/scannet_openseg_768.npy')
@@ -373,21 +357,11 @@ def validate(val_loader, model, criterion):
             output = output[inds_reverse, :]
             output = output.half() @ text_features.t()
             loss = criterion(output, label)
-            # output = torch.max(output, 1)[1]
 
             if args.multiprocessing_distributed:
                 dist.all_reduce(output)
             preds.append(output.detach_().cpu().max(1)[1])
             gts.append(label.cpu())
-            # intersection, union, target = intersectionAndUnionGPU(output, label.detach(),
-            #                                                       args.classes, args.ignore_label)
-            # if args.multiprocessing_distributed:
-            #     dist.all_reduce(intersection), dist.all_reduce(
-            #         union), dist.all_reduce(target)
-            # intersection, union, target = intersection.cpu(
-            # ).numpy(), union.cpu().numpy(), target.cpu().numpy()
-            # intersection_meter.update(intersection), union_meter.update(
-            #     union), target_meter.update(target)
 
             loss_meter.update(loss.item(), args.batch_size)
     gt = torch.cat(gts)
@@ -396,15 +370,7 @@ def validate(val_loader, model, criterion):
                                 gt.numpy(),
                                 dataset='scannet_3d',
                                 stdout=True)
-    # iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
-    # accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
-    # mIoU = np.mean(iou_class)
-    # mAcc = np.mean(accuracy_class)
-    # allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
-    # if main_process():
-    #     logger.info(
-    #         'Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
-    # return loss_meter.avg, current_iou, mAcc, allAcc
+
     return loss_meter.avg, current_iou
 
 

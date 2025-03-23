@@ -40,6 +40,7 @@ TEST:
   test_batch_size: 1
   test_repeats: 5
   model_path: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/3DSS-VLG/out_scannet/openseg/model/model_best.pth.tar
+  # model_path: /data/xuxiaoxu/code/openvocabulary/ovdet_2d/ws_seg/out_test/scannet_use_color/model/model_best.pth.tar
   save_folder:
 
 Distributed:
